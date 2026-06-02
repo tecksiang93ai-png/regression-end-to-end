@@ -1,0 +1,6 @@
+New-Item : The file 'C:\Users\tecks\Downloads\documentation\.gitignore' already exists.
+At line:1 char:1
++ New-Item -Path "C:\Users\tecks\Downloads\documentation\.gitignore" -I ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : WriteError: (C:\Users\tecks\...tion\.gitignore:String) [New-Item], IOException
+    + FullyQualifiedErrorId : NewItemIOError,Microsoft.PowerShell.Commands.NewItemCommand
