@@ -1,0 +1,15 @@
+,n_unique,pct_of_rows
+id,84465,95.24
+resale_price,2494,2.81
+block,2324,2.62
+remaining_lease,654,0.74
+street_name,535,0.6
+floor_area_sqm,165,0.19
+lease_commence_date,101,0.11
+month,54,0.06
+town_id,26,0.03
+town_name,26,0.03
+flatm_id,21,0.02
+flatm_name,21,0.02
+storey_range,17,0.02
+flat_type,8,0.01

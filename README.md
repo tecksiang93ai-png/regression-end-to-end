@@ -23,6 +23,7 @@ transaction data, providing data-driven valuations to support property consultan
 │   ├── model_training.py           # model factory, tuning, selection, evaluation, artifacts
 │   └── predict.py                  # inference on new data with the saved model
 ├── tests/                          # pytest suite (cleaning, preprocessing, training)
+├── reports/                        # persisted EDA summaries (cardinality, VIF, outliers)
 ├── eda.ipynb                       # exploratory data analysis
 ├── main.py                         # end-to-end pipeline entry point
 ├── requirements.txt                # pinned dependencies
@@ -56,20 +57,26 @@ Dependencies are **version-pinned** in `requirements.txt` for reproducibility
 
 ```bash
 python main.py
+python main.py --config ./src/config.yaml --log-level DEBUG
 ```
 
 This validates the config, loads and cleans the data, trains and tunes every configured
-model, selects the best on the validation set, refits it on train+validation, evaluates once
-on the held-out test set, and writes artifacts to `./artifacts/`.
+model, selects the best on the validation set (with a deterministic tie-break), refits it on
+train+validation, evaluates once on the held-out test set, and writes artifacts to
+`./artifacts/`. Artifacts are saved under both stable names (`best_model.joblib`) and
+run-versioned names (`best_model_<model>_<timestamp>.joblib`) so successive runs don't
+overwrite each other; `environment.txt` captures the exact package versions used.
 
 ## Predict on new data
 
 ```bash
+python main.py --mode predict --input data/new_transactions.csv --output predictions.csv
+# equivalently:
 python -m src.predict --input data/new_transactions.csv --output predictions.csv
 ```
 
-Loads the saved model and scores a new CSV (same raw schema), reusing the exact cleaning and
-feature-engineering logic from training.
+Loads the saved model and scores a new CSV (same raw schema, validated before cleaning),
+reusing the exact cleaning and feature-engineering logic from training.
 
 ## Run the tests
 
@@ -81,8 +88,32 @@ python -m pytest tests/ -q
 
 All behaviour is driven by `./src/config.yaml` — the random seed, feature lists, imputation
 strategies, the split ratios, the models and their hyper-parameter grids, the model-selection
-metric, and the artifacts location. The config is validated on load, so a missing or invalid
-key fails fast with a clear message.
+metric and tie-break, an optional feature-selection stage, and the artifacts location. The
+config is validated on load, so a missing or invalid key fails fast with a clear message.
+
+---
+
+# Data Dictionary
+
+Raw columns in `data/resale_transactions.csv`:
+
+| Column | Type | Description |
+| ------ | ---- | ----------- |
+| `id` | int | Row identifier (dropped; duplicates removed) |
+| `month` | str `YYYY-MM` | Transaction month → engineered into `year` + `month` |
+| `flat_type` | str | Flat size (`1 ROOM`…`EXECUTIVE`, `MULTI-GENERATION`); ordinal |
+| `block`, `street_name` | str | Address labels (dropped: high-cardinality / leakage risk) |
+| `storey_range` | str `AA TO BB` | Floor band → numeric midpoint |
+| `floor_area_sqm` | float | Floor area in m² (strongest predictor) |
+| `lease_commence_date` | int (year) | Lease start year (negative values corrected via abs) |
+| `remaining_lease` | str | Two formats → engineered `remaining_lease_months` (int) |
+| `town_id` / `town_name` | int / str | Town (id used to back-fill missing names, then dropped) |
+| `flatm_id` / `flatm_name` | int / str | Flat model (same id back-fill treatment) |
+| `resale_price` | float | **Target** — transacted resale price (SGD) |
+
+Engineered features fed to the model: `floor_area_sqm`, `remaining_lease_months`,
+`lease_commence_date`, `year` (numeric); `month`, `town_name`, `flatm_name` (nominal);
+`flat_type` (ordinal); `storey_range` midpoint (passthrough).
 
 ---
 
@@ -173,6 +204,29 @@ once on the held-out test set).
 Moving from linear models (R² ≈ 0.86) to a tuned RandomForest lifts test R² to **0.95** — the
 non-linear models clearly capture interactions the linear models cannot, while the Dummy
 baseline (R² ≈ 0) confirms the models add real predictive value.
+
+---
+
+# Limitations & Next Steps
+
+**Limitations**
+
+* The data covers **2015–2019 only**; the model should not be extrapolated to later periods
+  without retraining, as HDB prices have since shifted.
+* `lease_commence_date` and `remaining_lease_months` are strongly collinear (high VIF), so
+  linear-model coefficients are not reliable for inference — the tree models are used instead.
+* `block` / `street_name` micro-location is intentionally dropped; very localised price effects
+  within a town are therefore not captured.
+* The negative-lease correction assumes a sign-flip corruption; if some values are wrong in
+  other ways, `abs()` will not catch them.
+
+**Next steps**
+
+* Add newer transactions and a time-based (rather than random) validation split.
+* Try target-encoding or a grouped location feature to recover some micro-location signal
+  without the leakage risk of raw address one-hot encoding.
+* Enable the optional feature-selection stage and compare, and add SHAP-based feature
+  importance to the reporting.
 
 ---
 

@@ -1,0 +1,8 @@
+feature,n_outliers,pct,target_mean_outliers,target_mean_rest
+floor_area_sqm,269,0.32,729134.0,437883.0
+lease_commence_date,0,0.0,,438811.0
+resale_price,3550,4.2,855882.0,420513.0
+storey_range,2508,2.97,704333.0,430686.0
+remaining_lease_months,0,0.0,,438811.0
+year,0,0.0,,438811.0
+month,0,0.0,,438811.0

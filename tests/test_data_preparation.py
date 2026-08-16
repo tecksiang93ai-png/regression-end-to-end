@@ -32,8 +32,17 @@ def test_extract_lease_info_bare_number():
     assert DataPreparation._extract_lease_info("81") == 81 * 12
 
 
-def test_extract_lease_info_missing_returns_none():
-    assert DataPreparation._extract_lease_info(np.nan) is None
+def test_extract_lease_info_missing_returns_nan():
+    assert np.isnan(DataPreparation._extract_lease_info(np.nan))
+
+
+def test_extract_lease_info_unparseable_returns_nan():
+    assert np.isnan(DataPreparation._extract_lease_info("not a lease"))
+
+
+def test_convert_storey_range_malformed_returns_nan():
+    # Malformed band must not crash the cleaning run; it yields NaN for the imputer.
+    assert np.isnan(DataPreparation._convert_storey_range("GROUND FLOOR"))
 
 
 def test_fill_missing_names_recovers_from_id(config):

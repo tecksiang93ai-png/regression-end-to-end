@@ -46,6 +46,16 @@ val_size: 0.5
 # Model selection policy (evaluated on the validation set).
 selection_metric: R2     # one of MAE, MSE, RMSE, R2
 selection_mode: max      # max for R2, min for error metrics
+selection_tiebreak: RMSE # deterministic secondary rule (lower error wins) if the
+                         # primary metric ties; the model name breaks any final tie.
+
+# Optional feature-selection stage inside the model pipeline (off by default).
+# method: variance_threshold (threshold) | select_k_best (k). Enable to experiment
+# from config without touching code.
+feature_selection:
+  enabled: false
+  method: variance_threshold
+  threshold: 0.0
 
 # Cross-validation used by the tuning search.
 cv: 3

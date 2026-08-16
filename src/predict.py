@@ -42,6 +42,16 @@ def run_inference(input_csv: str, output_csv: str, config_path: str = "./src/con
         raise FileNotFoundError(f"Input CSV not found: {Path(input_csv).resolve()}")
     raw = pd.read_csv(input_csv)
 
+    # Validate the input schema before cleaning: the target is optional at inference
+    # time, but the raw feature/source columns the cleaner depends on must be present.
+    required = {
+        "month", "flat_type", "storey_range", "remaining_lease",
+        "lease_commence_date", "town_id", "town_name", "flatm_id", "flatm_name",
+    }
+    missing = required - set(raw.columns)
+    if missing:
+        raise ValueError(f"Input CSV is missing required column(s): {sorted(missing)}")
+
     prep = DataPreparation(config)
     cleaned = prep.clean_data(raw.copy())
     # Drop the target if the caller happened to include it — it is not an input.

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 # Related third-party imports
+import numpy as np
 import pandas as pd
 import yaml
 from sklearn.compose import ColumnTransformer
@@ -79,7 +80,13 @@ def load_data(config: Dict[str, Any]) -> pd.DataFrame:
     missing = required_raw - set(df.columns)
     if missing:
         raise ValueError(f"Raw data is missing expected column(s): {sorted(missing)}")
-    logging.info("Loaded raw data: %d rows x %d columns.", *df.shape)
+    # Sanity-check that the key numeric columns really are numeric (a common CSV
+    # corruption is a stray text value turning a whole column to object dtype).
+    for col in (config["target_column"], "floor_area_sqm", "lease_commence_date"):
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            raise ValueError(f"Expected numeric column '{col}' but got dtype {df[col].dtype}.")
+    mem_mb = df.memory_usage(deep=True).sum() / 1024 ** 2
+    logging.info("Loaded raw data: %d rows x %d columns (%.1f MB).", *df.shape, mem_mb)
     return df
 
 
@@ -169,13 +176,24 @@ class DataPreparation:
 
     @staticmethod
     def _convert_storey_range(storey_range: str) -> float:
-        range_values = storey_range.split(" TO ")
-        return (int(range_values[0]) + int(range_values[1])) / 2
+        """Convert a storey band like '07 TO 09' to its numeric midpoint (8.0).
+
+        Malformed input (not an 'A TO B' pair) returns NaN rather than raising, so
+        one bad row can't abort the whole cleaning run; the imputer fills it later.
+        """
+        try:
+            low, high = str(storey_range).split(" TO ")
+            return (int(low) + int(high)) / 2
+        except (ValueError, AttributeError):
+            return np.nan
 
     @staticmethod
     def _fill_missing_names(
         df: pd.DataFrame, id_column: str, name_column: str
     ) -> pd.DataFrame:
+        """Back-fill missing values in ``name_column`` from an id->name mapping
+        learned from the rows where the name is present (e.g. recover a missing
+        `town_name` from its `town_id`)."""
         missing_names = df[name_column].isna()
         name_mapping = (
             df[[id_column, name_column]]
@@ -190,18 +208,25 @@ class DataPreparation:
         return df
 
     @staticmethod
-    def _extract_lease_info(lease_str: str) -> int:
+    def _extract_lease_info(lease_str) -> float:
+        """Parse a remaining-lease string into whole months.
+
+        Handles both stored formats: the verbose '70 years 03 months' and the bare
+        '81' (years only). Missing or unparseable input returns ``np.nan`` — a
+        consistent numeric sentinel that the pipeline's imputer then fills — rather
+        than a silent 0, which would understate the lease.
+        """
         if pd.isna(lease_str):
-            return None
-        years_match = re.search(r"(\d+)\s*years?", lease_str)
-        months_match = re.search(r"(\d+)\s*months?", lease_str)
-        number_match = re.match(r"^\d+$", lease_str.strip())
+            return np.nan
+        text = str(lease_str).strip()
+        years_match = re.search(r"(\d+)\s*years?", text)
+        months_match = re.search(r"(\d+)\s*months?", text)
+        number_match = re.match(r"^\d+$", text)
         if years_match:
             years = int(years_match.group(1))
         elif number_match:
             years = int(number_match.group(0))
         else:
-            years = 0
+            return np.nan
         months = int(months_match.group(1)) if months_match else 0
-        total_months = years * 12 + months
-        return total_months
+        return float(years * 12 + months)

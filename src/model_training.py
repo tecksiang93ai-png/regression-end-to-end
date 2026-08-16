@@ -1,6 +1,9 @@
 # Standard library imports
 import json
 import logging
+import platform
+from datetime import datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Dict
 
@@ -15,6 +18,7 @@ from sklearn.ensemble import (
     HistGradientBoostingRegressor,
     RandomForestRegressor,
 )
+from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_regression
 from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import (
     mean_absolute_error,
@@ -22,7 +26,7 @@ from sklearn.metrics import (
     r2_score,
     root_mean_squared_error,
 )
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 
 # Registry mapping the estimator names used in config.yaml to their classes.
@@ -41,13 +45,26 @@ _SEEDED = {
     "GradientBoostingRegressor",
     "HistGradientBoostingRegressor",
 }
+# Packages whose versions we record alongside artifacts for reproducibility.
+_TRACKED_PACKAGES = [
+    "pandas", "numpy", "scikit-learn", "scipy",
+    "matplotlib", "seaborn", "pyyaml", "joblib",
+]
+
+
+def _safe_version(pkg: str) -> str:
+    try:
+        return version(pkg)
+    except PackageNotFoundError:
+        return "not installed"
 
 
 class ModelTraining:
     """Train, tune, select, and evaluate regression models on HDB resale data.
 
-    The set of models, their hyper-parameter grids, the selection policy, and the
-    output location all come from ``config``; nothing is hard-coded here.
+    The set of models, their hyper-parameter grids, the selection policy (metric,
+    mode, and tie-break), an optional feature-selection stage, and the output
+    location all come from ``config``; nothing is hard-coded here.
     """
 
     def __init__(self, config: Dict[str, Any], preprocessor: ColumnTransformer):
@@ -71,23 +88,45 @@ class ModelTraining:
         )
         return X_train, X_val, X_test, y_train, y_val, y_test
 
+    def _feature_selector(self):
+        """Optional feature-selection step, enabled and configured from config.
+
+        Off by default (returns None). When ``feature_selection.enabled`` is true,
+        insert a ``VarianceThreshold`` or ``SelectKBest`` step after preprocessing —
+        letting you experiment with selection from config without editing code.
+        """
+        fs = self.config.get("feature_selection") or {}
+        if not fs.get("enabled"):
+            return None
+        method = fs.get("method", "variance_threshold")
+        if method == "variance_threshold":
+            return VarianceThreshold(threshold=fs.get("threshold", 0.0))
+        if method == "select_k_best":
+            return SelectKBest(score_func=f_regression, k=fs.get("k", "all"))
+        raise ValueError(f"Unknown feature_selection.method: {method!r}")
+
     def _make_pipeline(self, estimator_name: str) -> Pipeline:
-        """Build a preprocess->regressor pipeline for a named estimator."""
+        """Build a preprocess -> (optional select) -> regressor pipeline."""
         if estimator_name not in ESTIMATORS:
             raise ValueError(
-                f"Unknown estimator '{estimator_name}'. "
-                f"Known: {sorted(ESTIMATORS)}"
+                f"Unknown estimator '{estimator_name}'. Known: {sorted(ESTIMATORS)}"
             )
         kwargs: Dict[str, Any] = {}
         if estimator_name in _SEEDED:
             kwargs["random_state"] = self.seed
         model = ESTIMATORS[estimator_name](**kwargs)
-        return Pipeline(steps=[("preprocessor", self.preprocessor), ("regressor", model)])
+        steps = [("preprocessor", self.preprocessor)]
+        selector = self._feature_selector()
+        if selector is not None:
+            steps.append(("selector", selector))
+        steps.append(("regressor", model))
+        return Pipeline(steps=steps)
 
     def train_and_tune(self, X_train, y_train, X_val, y_val) -> Dict[str, Dict[str, Any]]:
         """Fit every model in the config. Models with a non-empty grid are tuned
-        with cross-validated grid search; the rest are fit with defaults. Each is
-        evaluated on the validation set. Returns a per-model result dict."""
+        with cross-validated grid search; the rest are fit with defaults but still
+        cross-validated for fold-level reporting. Each is evaluated on the
+        validation set. Returns a per-model result dict."""
         cv = self.config.get("cv", 5)
         scoring = self.config.get("scoring", "r2")
         results: Dict[str, Dict[str, Any]] = {}
@@ -96,34 +135,50 @@ class ModelTraining:
             pipeline = self._make_pipeline(spec["estimator"])
             if grid:
                 logging.info("Tuning %s over %d-fold CV ...", name, cv)
-                search = GridSearchCV(
-                    pipeline, grid, cv=cv, scoring=scoring, n_jobs=-1
-                )
+                search = GridSearchCV(pipeline, grid, cv=cv, scoring=scoring, n_jobs=-1)
                 search.fit(X_train, y_train)
                 fitted = search.best_estimator_
                 best_params = search.best_params_
-                cv_best = float(search.best_score_)
+                bi = search.best_index_
+                cv_mean = float(search.cv_results_["mean_test_score"][bi])
+                cv_std = float(search.cv_results_["std_test_score"][bi])
             else:
                 logging.info("Fitting %s (no tuning) ...", name)
+                scores = cross_val_score(
+                    pipeline, X_train, y_train, cv=cv, scoring=scoring, n_jobs=-1
+                )
+                cv_mean, cv_std = float(scores.mean()), float(scores.std())
                 pipeline.fit(X_train, y_train)
                 fitted = pipeline
                 best_params = {}
-                cv_best = None
+            logging.info("  %s CV %s = %.4f +/- %.4f", name, scoring, cv_mean, cv_std)
             results[name] = {
                 "pipeline": fitted,
                 "val_metrics": self.evaluate(fitted, X_val, y_val, f"{name} (val)"),
                 "best_params": best_params,
-                "cv_best_score": cv_best,
+                "cv_mean": cv_mean,
+                "cv_std": cv_std,
             }
         return results
 
     def select_best(self, results: Dict[str, Dict[str, Any]]) -> str:
-        """Pick the winning model by the configured validation metric/mode."""
+        """Pick the winner by the configured validation metric, breaking ties
+        deterministically with a secondary metric (lower error wins) and finally
+        the model name, so selection never depends on dict iteration order."""
         metric = self.config["selection_metric"]
         mode = self.config["selection_mode"]
-        chooser = max if mode == "max" else min
-        best = chooser(results, key=lambda n: results[n]["val_metrics"][metric])
-        logging.info("Best model on validation (%s %s): %s", mode, metric, best)
+        tiebreak = self.config.get("selection_tiebreak", "RMSE")
+        primary_sign = -1.0 if mode == "max" else 1.0  # min() over signed key
+
+        def sort_key(name):
+            m = results[name]["val_metrics"]
+            return (primary_sign * m[metric], m[tiebreak], name)
+
+        best = min(results, key=sort_key)
+        logging.info(
+            "Best model on validation (%s %s, tie-break %s): %s",
+            mode, metric, tiebreak, best,
+        )
         return best
 
     def refit_on_train_val(self, fitted_pipeline, X_train, X_val, y_train, y_val):
@@ -152,39 +207,63 @@ class ModelTraining:
 
     def save_artifacts(
         self, best_name, final_model, results, final_metrics, X_test, y_test
-    ) -> None:
-        """Persist the fitted pipeline, a model-comparison table, test predictions,
-        and a run manifest (best model, params, metrics, seed, config snapshot)."""
+    ) -> str:
+        """Persist the fitted pipeline, a model-comparison table (with fold-level
+        CV mean/std), test predictions, the runtime package versions, and a run
+        manifest. Files are written under both stable names (for inference) and
+        run-versioned names (so successive experiments don't overwrite each other).
+        Returns the run id."""
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         out = Path(self.config["artifacts_dir"])
-        out.mkdir(parents=True, exist_ok=True)
+        try:
+            out.mkdir(parents=True, exist_ok=True)
 
-        joblib.dump(final_model, out / "best_model.joblib")
+            # Model: a stable pointer for inference + a versioned copy for history.
+            joblib.dump(final_model, out / "best_model.joblib")
+            joblib.dump(final_model, out / f"best_model_{best_name}_{run_id}.joblib")
 
-        rows = []
-        for name, r in results.items():
-            row = {"model": name}
-            row.update({f"val_{k}": v for k, v in r["val_metrics"].items()})
-            row["cv_best_score"] = r["cv_best_score"]
-            rows.append(row)
-        pd.DataFrame(rows).sort_values("val_R2", ascending=False).to_csv(
-            out / "model_comparison.csv", index=False
-        )
+            # Comparison table with fold-level CV mean/std for stability reading.
+            rows = []
+            for name, r in results.items():
+                row = {"model": name}
+                row.update({f"val_{k}": v for k, v in r["val_metrics"].items()})
+                row["cv_mean"] = r["cv_mean"]
+                row["cv_std"] = r["cv_std"]
+                rows.append(row)
+            comparison = pd.DataFrame(rows).sort_values("val_R2", ascending=False)
+            comparison.to_csv(out / "model_comparison.csv", index=False)
+            comparison.to_csv(out / f"model_comparison_{run_id}.csv", index=False)
 
-        preds = pd.DataFrame(
-            {"y_true": y_test.to_numpy(), "y_pred": final_model.predict(X_test)}
-        )
-        preds.to_csv(out / "test_predictions.csv", index=False)
+            pd.DataFrame(
+                {"y_true": y_test.to_numpy(), "y_pred": final_model.predict(X_test)}
+            ).to_csv(out / "test_predictions.csv", index=False)
 
-        manifest = {
-            "best_model": best_name,
-            "best_params": results[best_name]["best_params"],
-            "selection_metric": self.config["selection_metric"],
-            "selection_mode": self.config["selection_mode"],
-            "final_test_metrics": final_metrics,
-            "random_seed": self.seed,
-            "config_snapshot": self.config,
-        }
-        (out / "run_manifest.json").write_text(
-            json.dumps(manifest, indent=2, default=str), encoding="utf-8"
-        )
-        logging.info("Artifacts written to %s", out.resolve())
+            env = {pkg: _safe_version(pkg) for pkg in _TRACKED_PACKAGES}
+            env["python"] = platform.python_version()
+            (out / "environment.txt").write_text(
+                "\n".join(f"{k}=={v}" for k, v in env.items()) + "\n", encoding="utf-8"
+            )
+
+            manifest = {
+                "run_id": run_id,
+                "best_model": best_name,
+                "best_params": results[best_name]["best_params"],
+                "selection_metric": self.config["selection_metric"],
+                "selection_mode": self.config["selection_mode"],
+                "selection_tiebreak": self.config.get("selection_tiebreak", "RMSE"),
+                "best_cv_mean": results[best_name]["cv_mean"],
+                "best_cv_std": results[best_name]["cv_std"],
+                "final_test_metrics": final_metrics,
+                "random_seed": self.seed,
+                "package_versions": env,
+                "config_snapshot": self.config,
+            }
+            for fname in ("run_manifest.json", f"run_manifest_{run_id}.json"):
+                (out / fname).write_text(
+                    json.dumps(manifest, indent=2, default=str), encoding="utf-8"
+                )
+        except OSError as exc:
+            logging.error("Failed to write artifacts to %s: %s", out, exc)
+            raise
+        logging.info("Artifacts (run %s) written to %s", run_id, out.resolve())
+        return run_id
