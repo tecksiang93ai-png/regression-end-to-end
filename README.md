@@ -2,215 +2,185 @@
 
 ## Project Description
 
-Cataria Property Solutions aims to improve the accuracy and consistency of HDB resale property valuations through machine learning. Traditional valuation methods often rely heavily on manual assessments and agent experience, which can lead to inconsistencies and inefficiencies.
+Cataria Property Solutions aims to improve the accuracy and consistency of HDB resale
+property valuations through machine learning. Traditional valuation methods rely heavily on
+manual assessment and agent experience, which can be inconsistent and slow.
 
-This project develops a regression-based machine learning pipeline that predicts HDB resale prices using historical transaction data. The solution provides data-driven property valuations to support property consultants and improve decision-making for clients.
+This project develops a regression pipeline that predicts HDB resale prices from historical
+transaction data, providing data-driven valuations to support property consultants.
+
+---
+
+# Project Structure
+
+```
+.
+├── data/
+│   └── resale_transactions.csv     # raw transaction data
+├── src/
+│   ├── config.yaml                 # all pipeline settings (no hard-coded values)
+│   ├── data_preparation.py         # config/data loaders, cleaning, feature eng, preprocessor
+│   ├── model_training.py           # model factory, tuning, selection, evaluation, artifacts
+│   └── predict.py                  # inference on new data with the saved model
+├── tests/                          # pytest suite (cleaning, preprocessing, training)
+├── eda.ipynb                       # exploratory data analysis
+├── main.py                         # end-to-end pipeline entry point
+├── requirements.txt                # pinned dependencies
+└── README.md
+```
 
 ---
 
 # Prerequisites & Installation
 
-## Requirements
-
 * Python 3.11
-* Conda (Recommended)
-* Git
-
-## Required Libraries
-
-```bash
-pandas
-numpy
-scikit-learn
-matplotlib
-seaborn
-pyyaml
-joblib
-```
-
-## Installation
 
 ```bash
 git clone <repository_url>
-cd hdb-resale-price-prediction
+cd regression-end-to-end
 
-conda create -n aiap_hdb python=3.11
-conda activate aiap_hdb
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   macOS/Linux: source .venv/bin/activate
 
 pip install -r requirements.txt
 ```
 
+Dependencies are **version-pinned** in `requirements.txt` for reproducibility
+(`pandas`, `numpy`, `scikit-learn`, `matplotlib`, `seaborn`, `pyyaml`, `joblib`).
+
 ---
 
-# Pipeline Execution
+# Usage
 
-## Run the Pipeline
+## Train
 
 ```bash
 python main.py
 ```
 
-## Modify Configuration
+This validates the config, loads and cleans the data, trains and tunes every configured
+model, selects the best on the validation set, refits it on train+validation, evaluates once
+on the held-out test set, and writes artifacts to `./artifacts/`.
 
-Project parameters can be configured in:
+## Predict on new data
 
 ```bash
-./src/config.yaml
+python -m src.predict --input data/new_transactions.csv --output predictions.csv
 ```
 
-Examples of configurable settings include:
+Loads the saved model and scores a new CSV (same raw schema), reusing the exact cleaning and
+feature-engineering logic from training.
 
-* Train-test split ratio
-* Random seed
-* Hyperparameter tuning settings
-* Feature selection options
-* Model configuration
+## Run the tests
 
-After updating the configuration file, rerun `main.py` to execute the pipeline with the new settings.
+```bash
+python -m pytest tests/ -q
+```
+
+## Configure
+
+All behaviour is driven by `./src/config.yaml` — the random seed, feature lists, imputation
+strategies, the split ratios, the models and their hyper-parameter grids, the model-selection
+metric, and the artifacts location. The config is validated on load, so a missing or invalid
+key fails fast with a clear message.
 
 ---
 
 # Pipeline Flow
 
-## Step 1: Data Loading
-
-Load raw HDB resale transaction data into the pipeline.
-
-## Step 2: Data Cleaning
-
-Perform data quality checks and preprocessing:
-
-* Remove duplicate records
-* Handle missing values
-* Correct data types
-* Remove irrelevant features
-* Remove post-hoc features to prevent data leakage
-
-## Step 3: Exploratory Data Analysis (EDA)
-
-Analyse the dataset to identify:
-
-* Feature distributions
-* Outliers
-* Correlations
-* Potential data quality issues
-
-## Step 4: Feature Engineering & Preprocessing
-
-Prepare data for modelling through:
-
-* Feature engineering
-* Encoding categorical variables
-* Feature scaling
-* Train-test splitting
-
-## Step 5: Model Training
-
-Train and compare:
-
-* Linear Regression
-* Ridge Regression
-* Lasso Regression
-
-## Step 6: Hyperparameter Tuning
-
-Optimise model performance using:
-
-* Grid Search CV
-* Randomized Search CV
-
-## Step 7: Model Evaluation
-
-Evaluate model performance using regression metrics.
-
-## Step 8: Model Saving
-
-Save the final selected model for deployment and future use.
+1. **Config loading & validation** — `load_config` checks all required keys are present.
+2. **Data loading** — `load_data` verifies the file exists and carries the expected columns.
+3. **Cleaning** — drop duplicates; merge the `FOUR ROOM` label into `4 ROOM`; fix corrupt
+   (negative) `lease_commence_date`; back-fill missing `town_name`/`flatm_name` from their ids.
+4. **Feature engineering** — `storey_range` → band midpoint; `month` → numeric `year` + `month`;
+   `remaining_lease` (both text formats) → `remaining_lease_months`. High-cardinality address
+   fields (`block`, `street_name`) and id columns are dropped to avoid leakage/noise.
+5. **Preprocessing** (inside a `ColumnTransformer`/`Pipeline`, fit on training data only):
+   impute → scale numerics; impute → one-hot encode nominals; impute → ordinal-encode
+   `flat_type`; pass through the numeric `storey_range`.
+6. **Splitting** — 80% train / 10% validation / 10% test, seeded for reproducibility.
+7. **Training & tuning** — every model in the config is fit; those with a grid are tuned with
+   cross-validated grid search.
+8. **Selection & final evaluation** — the best model on validation is refit on train+val, then
+   evaluated once on the test set.
+9. **Artifacts** — the fitted pipeline, a model-comparison table, test predictions, and a run
+   manifest are saved.
 
 ---
 
 # Key EDA Findings
 
-Several important patterns were identified during exploratory data analysis.
+The exploratory analysis (`eda.ipynb`) surfaced the data-quality issues the cleaning step
+fixes (4,223 duplicate rows, 9,394 negative lease years, missing town/flat-model names, the
+`FOUR ROOM` typo, and a mixed-format `remaining_lease` field) and the main drivers of price:
 
-Floor area was found to be one of the strongest predictors of resale price, with larger flats generally achieving higher transaction values. Location-related features such as town also showed significant influence, reflecting differences in demand across various regions in Singapore. Remaining lease demonstrated a positive relationship with resale price, where flats with longer lease durations tended to command higher prices.
-
-In addition, several numerical features contained outliers and skewed distributions, requiring preprocessing and scaling before model training. These findings directly informed the feature engineering and model development process.
+* **`floor_area_sqm`** is the strongest single predictor (r ≈ 0.64).
+* **Storey height** and **remaining lease** are the next most useful numeric features.
+* **`flat_type`** tracks price almost monotonically (1-ROOM → Multi-Generation), supporting an
+  ordinal encoding, and **`town`** captures a large location effect.
+* The target is right-skewed with genuine high-value outliers, and `lease_commence_date` is
+  strongly collinear with `remaining_lease_months` — both reasons to favour tree ensembles.
 
 ---
 
 # Feature Handling
 
-| Feature                | Treatment           | Reason                                                 |
-| ---------------------- | ------------------- | ------------------------------------------------------ |
-| town                   | One-Hot Encoding    | Convert location categories into numerical features    |
-| flat_type              | Ordinal Encoding    | Preserve the natural ordering of flat types            |
-| storey_range           | Ordinal Encoding    | Preserve the ordering of floor levels                  |
-| floor_area_sqm         | Feature Scaling     | Standardise numerical values                           |
-| remaining_lease        | Feature Engineering | Extract lease information for modelling                |
-| remaining_lease_months | Feature Engineering | Convert lease duration into a numerical format         |
-| year                   | Feature Engineering | Capture temporal effects in resale prices              |
-| month                  | Feature Engineering | Capture seasonal transaction patterns                  |
-| Missing Values         | Imputation          | Handle incomplete records while retaining observations |
-| Duplicate Records      | Removed             | Improve data quality and prevent bias                  |
-| Irrelevant Features    | Removed             | Reduce noise and improve model performance             |
-| Post-hoc Features      | Removed             | Prevent data leakage                                   |
+| Feature                | Treatment                          | Reason                                             |
+| ---------------------- | ---------------------------------- | -------------------------------------------------- |
+| town_name, flatm_name  | Impute → One-Hot Encoding          | Unordered location/model categories                |
+| flat_type              | Impute → Ordinal Encoding          | Preserve the natural flat-size ordering            |
+| storey_range           | Convert to band midpoint (numeric) | Preserve floor-height ordering cheaply             |
+| floor_area_sqm         | Impute → Standard Scaling          | Standardise the strongest numeric predictor        |
+| remaining_lease        | Feature engineering → months (int) | Unify the two text formats into a number           |
+| year, month            | Feature engineering from `month`   | Capture temporal / seasonal effects                |
+| Missing town/flat names | Back-fill from id mapping          | Recover names without dropping rows                |
+| Duplicate records      | Removed                            | Prevent bias                                       |
+| block, street_name, id | Removed                            | High-cardinality identifiers → leakage/noise risk  |
 
 ---
 
-# Model Choices
+# Models
 
-## Linear Regression
-
-Linear Regression was selected as the baseline model because it is simple, interpretable, and provides a benchmark for comparison.
-
-## Ridge Regression
-
-Ridge Regression was selected to reduce overfitting through L2 regularisation. It shrinks coefficient values while retaining all features, improving model generalisation.
-
-## Lasso Regression
-
-Lasso Regression was selected because it combines regularisation with feature selection by shrinking some coefficients to zero, reducing model complexity.
+A **`DummyRegressor`** (predict-the-mean) provides a naive baseline. **Linear / Ridge / Lasso**
+give interpretable linear benchmarks. **RandomForest** and **HistGradientBoosting** capture the
+non-linear feature interactions that dominate housing prices. Models with a hyper-parameter
+grid are tuned with cross-validated grid search; the best on validation is selected.
 
 ---
 
 # Model Evaluation
 
-The models were evaluated using:
+Metrics: MAE, MSE, RMSE, R² (validation shown for model comparison; the winner is re-evaluated
+once on the held-out test set).
 
-* Mean Absolute Error (MAE)
-* Root Mean Squared Error (RMSE)
-* R² Score
+| Model                  | Validation R² |
+| ---------------------- | ------------- |
+| **RandomForest**       | **0.952**     |
+| HistGradientBoosting   | 0.949         |
+| Lasso                  | 0.858         |
+| Linear Regression      | 0.858         |
+| Ridge                  | 0.858         |
+| Dummy (baseline)       | ~0.000        |
 
-## Final Selected Model: Ridge Regression
+## Final Selected Model: RandomForest
 
-| Metric   | Result  |
-| -------- | ------- |
-| R² Score | 0.865   |
-| MAE      | $41,352 |
+| Metric | Test result |
+| ------ | ----------- |
+| R²     | 0.953       |
+| RMSE   | ~$31,735    |
+| MAE    | ~$22,376    |
 
-The tuned Ridge Regression model achieved the best overall performance. It explains approximately 86.5% of the variation in HDB resale prices while maintaining an average prediction error of approximately $41,352. These results demonstrate strong predictive performance and good generalisation to unseen data.
+Moving from linear models (R² ≈ 0.86) to a tuned RandomForest lifts test R² to **0.95** — the
+non-linear models clearly capture interactions the linear models cannot, while the Dummy
+baseline (R² ≈ 0) confirms the models add real predictive value.
 
 ---
 
 # Deployment Considerations
 
-## Scalability
-
-The Ridge Regression model is computationally efficient and can scale effectively to handle large volumes of valuation requests.
-
-## Real-Time Performance
-
-Prediction latency is low, making the model suitable for near real-time property valuation applications.
-
-## Integration
-
-The model can be integrated into Cataria Property Solutions' existing systems through APIs, dashboards, or web applications.
-
-## Monitoring and Maintenance
-
-Property market conditions may change over time, leading to data drift and reduced model performance. Continuous monitoring should be implemented to track performance and determine when retraining is required.
-
-## Business Impact
-
-This solution provides Cataria Property Solutions with a consistent, data-driven approach to HDB resale price estimation, helping improve valuation accuracy and support better business decisions.
+* **Integration** — the saved pipeline (`artifacts/best_model.joblib`) can be served via the
+  `src/predict.py` inference interface behind an API or dashboard.
+* **Monitoring** — property markets drift; track live prediction error and retrain when it
+  degrades. The seeded, config-driven pipeline makes retraining reproducible.
+* **Business impact** — a consistent, data-driven valuation to support faster, more reliable
+  decisions for Cataria Property Solutions' consultants.

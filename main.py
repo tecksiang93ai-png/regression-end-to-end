@@ -1,64 +1,66 @@
 # Standard library imports
 import logging
+import random
 
 # Third-party imports
-import pandas as pd
-import yaml
-from sklearn.utils._testing import ignore_warnings
+import numpy as np
 
-# Local application/library specific imports
-from src.data_preparation import DataPreparation
+# Local application imports
+from src.data_preparation import DataPreparation, load_config, load_data
 from src.model_training import ModelTraining
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+CONFIG_PATH = "./src/config.yaml"
 
 
-@ignore_warnings(category=Warning)
-def main():
+def set_global_seed(seed: int) -> None:
+    """Seed Python and NumPy so a run is reproducible end to end."""
+    random.seed(seed)
+    np.random.seed(seed)
 
-    # Configuration file path
-    config_path = "./src/config.yaml"
 
-    with open(config_path, "r") as file:
-        config = yaml.safe_load(file)
+def main() -> None:
+    # 1. Config (validated) + reproducibility.
+    config = load_config(CONFIG_PATH)
+    set_global_seed(config["random_seed"])
 
-    # Load CSV file into a DataFrame
-    df = pd.read_csv(config["file_path"])
+    # 2. Load raw data (schema-checked).
+    df = load_data(config)
 
-    # Initialize and run data preparation
+    # 3. Clean + engineer features.
     data_prep = DataPreparation(config)
     cleaned_df = data_prep.clean_data(df)
 
-    # Initialize model training with the created preprocessor
-    model_training = ModelTraining(config, data_prep.preprocessor)
+    # 4. Split into train / validation / test.
+    trainer = ModelTraining(config, data_prep.preprocessor)
+    X_train, X_val, X_test, y_train, y_val, y_test = trainer.split_data(cleaned_df)
 
-    # Split the data
-    X_train, X_val, X_test, y_train, y_val, y_test = model_training.split_data(cleaned_df)
+    # 5. Train + tune every configured model, evaluate on validation.
+    results = trainer.train_and_tune(X_train, y_train, X_val, y_val)
 
-    # Train and evaluate baseline models
-    baseline_models, baseline_metrics = model_training.train_and_evaluate_baseline_models(
-        X_train, y_train, X_val, y_val
+    # 6. Select the best by the configured validation metric.
+    best_name = trainer.select_best(results)
+
+    # 7. Refit the winner on train+val, then evaluate ONCE on the held-out test set.
+    final_model = trainer.refit_on_train_val(
+        results[best_name]["pipeline"], X_train, X_val, y_train, y_val
     )
+    final_metrics = trainer.evaluate(final_model, X_test, y_test, f"{best_name} (final test)")
 
-    # Train and evaluate tuned models
-    tuned_models, tuned_metrics = model_training.train_and_evaluate_tuned_models(
-        X_train, y_train, X_val, y_val
-    )
+    # 8. Persist artifacts (model, comparison table, predictions, run manifest).
+    trainer.save_artifacts(best_name, final_model, results, final_metrics, X_test, y_test)
 
-    # Combine all models and metrics
-    all_models = {**baseline_models, **tuned_models}
-    all_metrics = {**baseline_metrics, **tuned_metrics}
-
-    # Find the best model based on R²
-    best_model_name = max(all_metrics, key=lambda k: all_metrics[k]["R²"])
-    best_model = all_models[best_model_name]
-    logging.info(f"Best Model Found: {best_model_name}")
-
-    # Evaluate the best model on the test set
-    final_metrics = model_training.evaluate_final_model(
-        best_model, X_test, y_test, best_model_name
-    )
+    logging.info("Pipeline complete. Best model: %s", best_name)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (FileNotFoundError, ValueError) as exc:
+        logging.error("Pipeline aborted: %s", exc)
+        raise

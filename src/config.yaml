@@ -1,24 +1,28 @@
+# ============================================================================
+# Configuration for the HDB resale-price regression pipeline.
+# Everything the pipeline needs is declared here so nothing is hard-coded in the
+# Python modules. main.py validates this file on load.
+# ============================================================================
+
 # Data settings
 file_path: ./data/resale_transactions.csv
-
-# Target variable
 target_column: resale_price
 
-# Feature settings
+# Reproducibility — one seed used for splitting AND every stochastic model.
+random_seed: 42
+
+# Feature settings (names are AFTER cleaning/engineering in data_preparation.py)
 numerical_features:
   - floor_area_sqm
   - remaining_lease_months
   - lease_commence_date
   - year
-
 nominal_features:
   - month
   - town_name
   - flatm_name
-
 ordinal_features:
   - flat_type
-
 passthrough_features:
   - storey_range
 
@@ -31,21 +35,52 @@ flat_type_categories:
   - MULTI-GENERATION
   - EXECUTIVE
 
-# Data splitting
+# Preprocessing — imputation runs inside the sklearn pipeline (fit on train only).
+numeric_imputer_strategy: median
+categorical_imputer_strategy: most_frequent
+
+# Data splitting: 80% train / 10% val / 10% test.
 val_test_size: 0.2
 val_size: 0.5
 
-# Hyperparameter tuning
-param_grid:
-  regressor__alpha:
-    - 0.1
-    - 1
-    - 10
-    - 100
-    - 1000
-  regressor__fit_intercept:
-    - true
-    - false
+# Model selection policy (evaluated on the validation set).
+selection_metric: R2     # one of MAE, MSE, RMSE, R2
+selection_mode: max      # max for R2, min for error metrics
 
-cv: 5
+# Cross-validation used by the tuning search.
+cv: 3
 scoring: r2
+
+# Models to train and (optionally) tune. An empty grid => fit with defaults,
+# which is how the DummyRegressor baseline and the plain linear model run.
+models:
+  dummy:
+    estimator: DummyRegressor
+    grid: {}
+  linear_regression:
+    estimator: LinearRegression
+    grid: {}
+  ridge:
+    estimator: Ridge
+    grid:
+      regressor__alpha: [0.1, 1, 10, 100, 1000]
+  lasso:
+    estimator: Lasso
+    grid:
+      regressor__alpha: [0.1, 1, 10, 100, 1000]
+  random_forest:
+    estimator: RandomForestRegressor
+    grid:
+      regressor__n_estimators: [200]
+      regressor__max_depth: [20, 30]
+      regressor__min_samples_leaf: [2]
+  # Histogram-based gradient boosting — far faster than the classic version on
+  # this row count, so a real search stays affordable.
+  gradient_boosting:
+    estimator: HistGradientBoostingRegressor
+    grid:
+      regressor__max_iter: [200, 400]
+      regressor__learning_rate: [0.05, 0.1]
+
+# Where trained artifacts are written.
+artifacts_dir: ./artifacts
